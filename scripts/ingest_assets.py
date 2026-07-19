@@ -29,7 +29,14 @@ import django
 django.setup()
 
 from django.core.files.storage import default_storage
+
 from apps.media_library.models import MediaAsset
+from apps.workspaces.models import Workspace
+
+
+def _get_workspace():
+    """Attach ingested assets to the first workspace (shared org library if none)."""
+    return Workspace.objects.order_by("created_at").first()
 
 
 # Verified source directories from brightbean-social-readiness.md
@@ -124,6 +131,7 @@ def ingest_assets(dry_run: bool = False) -> Dict:
     print(f"Unique assets after deduplication: {len(unique_assets)}")
 
     results = {"uploaded": 0, "skipped": 0, "errors": []}
+    workspace = _get_workspace()
 
     for asset in unique_assets:
         metadata = ASSET_METADATA.get(asset["filename"], {})
@@ -131,8 +139,9 @@ def ingest_assets(dry_run: bool = False) -> Dict:
         project = metadata.get("project", "general")
         asset_type = metadata.get("type", "image" if asset["filename"].endswith((".png", ".jpg", ".jpeg", ".webp")) else "video")
 
-        # Check if already exists in DB
-        if MediaAsset.objects.filter(sha256=asset["sha256"]).exists():
+        # Check if already ingested (sha256 is tracked in the attribution field
+        # as "sha256:<hash>" since MediaAsset has no dedicated hash column).
+        if MediaAsset.objects.filter(attribution__contains=asset["sha256"]).exists():
             print(f"  ⏭️  Already in DB: {asset['filename']}")
             results["skipped"] += 1
             continue
@@ -153,16 +162,23 @@ def ingest_assets(dry_run: bool = False) -> Dict:
                     f
                 )
 
+            import mimetypes
+            mime_type, _ = mimetypes.guess_type(asset["filename"])
+
             # Create MediaAsset record
             media_asset = MediaAsset.objects.create(
                 title=title,
+                filename=asset["filename"],
                 file=saved_path,
-                sha256=asset["sha256"],
                 file_size=asset["path"].stat().st_size,
-                mime_type=asset_type,
-                project=project,
+                media_type=asset_type,
+                mime_type=mime_type or "",
                 tags=[project],
                 alt_text=title,
+                source="upload",
+                attribution=f"sha256:{asset['sha256']}",
+                workspace=workspace,
+                organization=getattr(workspace, "organization", None),
             )
             print(f"     ✅ Created MediaAsset #{media_asset.id}")
             results["uploaded"] += 1
